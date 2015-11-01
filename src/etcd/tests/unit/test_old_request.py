@@ -10,40 +10,21 @@ from etcd import EtcdException
 
 class FakeHTTPResponse(object):
 
-    def __init__(self, status, data=''):
+    def __init__(self, status, data='', headers=None):
         self.status = status
         self.data = data.encode('utf-8')
+        self.headers = headers or {
+            "x-etcd-cluster-id": "abdef12345",
+        }
 
     def getheaders(self):
-        return {}
+        return self.headers
+
+    def getheader(self, header):
+        return self.headers[header]
+
 
 class TestClientRequest(unittest.TestCase):
-
-    def test_machines(self):
-        """ Can request machines """
-        client = etcd.Client()
-        client.api_execute = mock.Mock(
-            return_value=FakeHTTPResponse(200, data=
-                                          "http://127.0.0.1:4002,"
-                                          " http://127.0.0.1:4001,"
-                                          " http://127.0.0.1:4003,"
-                                          " http://127.0.0.1:4001")
-        )
-
-        assert client.machines == [
-            'http://127.0.0.1:4002',
-            'http://127.0.0.1:4001',
-            'http://127.0.0.1:4003',
-            'http://127.0.0.1:4001'
-        ]
-
-    def test_leader(self):
-        """ Can request the leader """
-        client = etcd.Client()
-        client.api_execute = mock.Mock(
-            return_value=FakeHTTPResponse(200, "http://127.0.0.1:7002"))
-        result = client.leader
-        self.assertEquals('http://127.0.0.1:7002', result)
 
     def test_set(self):
         """ Can set a value """
@@ -171,7 +152,7 @@ class TestClientRequest(unittest.TestCase):
     def test_not_in(self):
         """ Can check if key is not in client """
         client = etcd.Client()
-        client.get = mock.Mock(side_effect=KeyError())
+        client.get = mock.Mock(side_effect=etcd.EtcdKeyNotFound())
         result = '/testkey' not in client
         self.assertEquals(True, result)
 
@@ -307,8 +288,8 @@ class TestClientApiExecutor(unittest.TestCase):
         try:
             client.api_execute('/v2/keys/testkey', client._MGET)
             assert False
-        except KeyError as e:
-            self.assertEquals(str(e), "'message : cause'")
+        except etcd.EtcdKeyNotFound as e:
+            self.assertEquals(str(e), 'message : cause')
 
     def test_put(self):
         """ http put request """
@@ -332,7 +313,7 @@ class TestClientApiExecutor(unittest.TestCase):
         except ValueError as e:
             self.assertEquals('message : cause', str(e))
 
-    def test_set_error(self):
+    def test_set_not_file_error(self):
         """ http post error request 102 """
         client = etcd.Client()
         response = FakeHTTPResponse(
@@ -343,45 +324,35 @@ class TestClientApiExecutor(unittest.TestCase):
         try:
             client.api_execute('/v2/keys/testkey', client._MPUT, payload)
             self.fail()
-        except KeyError as e:
+        except etcd.EtcdNotFile as e:
             self.assertEquals('message : cause', str(e))
-
-    def test_set_error(self):
-        """ http post error request 102 """
-        client = etcd.Client()
-        response = FakeHTTPResponse(
-            status=400,
-            data='{"message": "message", "cause": "cause", "errorCode": 102}')
-        client.http.request_encode_body = mock.Mock(return_value=response)
-        payload = {'value': 'value', 'prevValue': 'oldValue', 'ttl': '60'}
-        try:
-            client.api_execute('/v2/keys/testkey', client._MPUT, payload)
-            self.fail()
-        except KeyError as e:
-            self.assertEquals("'message : cause'", str(e))
 
     def test_get_error_unknown(self):
         """ http get error request unknown """
         client = etcd.Client()
         response = FakeHTTPResponse(status=400,
                                     data='{"message": "message",'
-                                    ' "cause": "cause",'
-                                    ' "errorCode": 42}')
+                                         ' "cause": "cause",'
+                                         ' "errorCode": 42}')
         client.http.request = mock.Mock(return_value=response)
         try:
             client.api_execute('/v2/keys/testkey', client._MGET)
             self.fail()
         except etcd.EtcdException as e:
-            self.assertTrue(
-                str(e).startswith("Unable to decode server response"))
+            self.assertEqual(str(e), "message : cause")
 
     def test_get_error_request_invalid(self):
         """ http get error request invalid """
         client = etcd.Client()
-        response = FakeHTTPResponse(status=200,
-                                    data='{){){)*garbage*')
+        response = FakeHTTPResponse(status=400,
+                                    data='{)*garbage')
         client.http.request = mock.Mock(return_value=response)
-        self.assertRaises(etcd.EtcdException, client.get, '/testkey')
+        try:
+            client.api_execute('/v2/keys/testkey', client._MGET)
+            self.fail()
+        except etcd.EtcdException as e:
+            self.assertEqual(str(e),
+                             "Bad response : {)*garbage")
 
     def test_get_error_invalid(self):
         """ http get error request invalid """
